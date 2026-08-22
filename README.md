@@ -56,3 +56,14 @@ Usage:
 Getting that token isn't scripted here (log in via the ffplayout web UI and
 check your browser's devtools network tab / settings page for it) — this
 tool only builds and optionally posts the JSON, it doesn't manage auth.
+
+## FFPlayout fork Deployment Script
+
+Since I now have my own fork of FFPlayout featuring a fix for the bitrate issue when using the hardware acceleration on a Raspberry PI 4, you need to replace the version installed via the .deb package with the one built from source. 
+
+I've provided a script for doing that. It builds the forked FFPlayout, removes the .deb install, installs the freshly built version, re-registers the service and restarts it. 
+
+You can run it simply with:
+```
+./replace-ffplayout-deb-with-fork.sh
+```
