@@ -376,3 +376,53 @@ was taken under the (unknowingly) broken SCHED_OTHER condition and
 may not reflect the true picture under correct scheduling.
 
 ---
+
+## 9. Re-profiled under genuine RT scheduling — sharpened the lead further
+
+Re-ran `perf sched record` with real-time scheduling now genuinely
+active (confirmed via `ps -T`: every block thread `SCHED_RR`/RTPRIO
+29, matching the Pi 4 exactly). Two clean unnamed `python3` threads
+at a higher RTPRIO 50 were checked and ruled out — both sit at 0.0%
+CPU, just idle housekeeping, not competing for cycles.
+
+**With real scheduling active, max wait times across the board dropped
+sharply** (0.4-0.9ms vs. 2-6ms under the earlier broken condition) —
+confirms real-time scheduling genuinely does what it's supposed to.
+**But `dvbt_reference_signals` remained the clear standout**: 939ms of
+cumulative scheduling-wait out of a 15s window, 3874 wakeups, and now
+also confirmed as the single busiest block by CPU time (7.0%, ahead
+of every other block in the chain). Separately, `hackrf_sink_c2`
+(the actual HackRF-feeding thread) is woken an enormous 19,882 times
+in 15 seconds but with negligible wait each time — it's being
+serviced promptly; the pressure is upstream, not at the final sink.
+
+**Checked the actual GNU Radio source for this block**
+(`dvbt_reference_signals_impl.cc`) to understand why: confirmed it
+*can* batch multiple OFDM symbols per `work()` call (`noutput_items`
+governs the loop, not a fixed one-symbol-per-call design) — so it's
+not an inherent architectural ceiling in this specific block. The
+actual per-call batch size is decided by GNU Radio's scheduler, based
+on how much buffer space and available input data exist at call time.
+
+**Tested buffer size in isolation** (the earlier `min_output_buffer`
+test had been confounded by also pinning every block to one core,
+which measurably made things worse) — reran with the larger buffers
+alone, no core-pinning. **Still identical continuous underruns.** This
+is a clean, useful negative result: it rules out *allocated buffer
+capacity* as the limiting factor on its own.
+
+**Where this leaves it, genuinely late now:** the most plausible
+remaining explanation is that the small per-call batch size isn't
+about buffer space at all, but about *input arrival granularity* —
+the relay delivers data in individual 1316-byte UDP datagrams, and if
+GNU Radio's scheduler naturally chunks its processing to match how
+much new input has actually arrived, no amount of downstream buffer
+tuning could fix that; the small-chunk behavior would be set upstream,
+by the network delivery pattern itself, and cascade through the whole
+chain regardless of buffer sizes further down. **Next concrete
+experiment for a future session**: have the relay (or an intermediate
+stage) batch many packets into fewer, larger sends before they reach
+the flowgraph, and see whether that changes `dvbt_reference_signals`'s
+wake frequency and the underrun behavior together.
+
+---
