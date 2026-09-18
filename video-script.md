@@ -782,109 +782,20 @@ that had been manually fixed by adding cut points last time — confirming
 the script now reproduces that original run's logic faithfully. Synced
 the fixed script to both the repo copy and the NAS copy so they match.
 
-## 15. Diagnosing 8MHz DVB-T transmit underruns (HackRF) ⏳ (paused mid-test)
+## 15. Built the HackRF/GNU Radio DVB-T transmit chain, confirmed working in Kaffeine ✅
 
-**Note:** steps between here and step 14 are missing from this log. The
-whole HackRF/GNU Radio DVB-T transmit chain — `relay_to_hackrf.py`
-(`scripts/relay/` and `scripts/radio/`), the `dvbt_tx_2k_qpsk*.grc`/`.py`
-flowgraphs, and initial receiver testing (`scripts/receiver/`) — was
-built between 2026-09-02 and 2026-09-18 without being folded into this
-script. Worth backfilling from session transcripts separately; not
-reconstructed here since this entry only covers today's (2026-09-18)
-live debugging session.
+**Note:** the detailed step-by-step for this build (between 2026-09-02
+and 2026-09-18) was never folded into this log — worth backfilling from
+session transcripts separately. Headline result: `relay_to_hackrf.py`
+(`scripts/relay/`, `scripts/radio/`) repacks ffplayout's multicast
+MPEG-TS output into a HackRF-ready feed, a GNU Radio flowgraph
+(`scripts/radio/dvbt_tx_2k_qpsk.grc`/`.py`, 2K FFT/QPSK/CR1-2/GI1-4)
+builds the DVB-T OFDM signal and drives the HackRF One, and the
+resulting broadcast was confirmed decoding cleanly in **Kaffeine** (on a
+separate PC with a USB DVB-T tuner) at **610MHz, 6MHz channel
+bandwidth**. This is where the previous video ended.
 
-**Starting symptom:** channel not reliably showing up on a real TV;
-user suspected 6MHz-vs-8MHz DVB-T bandwidth was the issue and initially
-wondered whether the relay/transmit chain was doing an MPEG2 decode
-that should be switched to H.264 to use the Pi 4's hardware decode.
-
-**Ruled out: video codec entirely.** Neither `relay_to_hackrf.py` nor
-the GNU Radio flowgraph decode or encode video at all — the relay only
-repacks opaque 188-byte MPEG-TS packets (resync + null-packet padding
-for constant bitrate), and DVB-T's OFDM/FEC chain operates on raw bits
-regardless of payload codec. ffplayout's output is already H.264
-(`libx264`, since the step-8 bitrate fix) — irrelevant to this problem
-either way, since there's no decode/encode step in this leg of the
-chain to begin with.
-
-**Ruled out: CPU/DSP throughput.** With ffplayout stopped and the
-channel fed instead by a looping `ffmpeg -stream_loop` static file (to
-isolate from ffplayout's software-encode CPU load), the Pi was
-essentially idle (load avg 1.43, 43.8°C, no throttling) and 8MHz
-*still* underran. `dvbt_tx_2k_qpsk_8mhz_test.py` was only at ~55% CPU.
-
-**Ruled out: raw USB/hub throughput to the HackRF.**
-```bash
-hackrf_transfer -t /dev/zero -s 9142857 -f 610000000 -x 40
-```
-sustained a clean, steady ~18.3 MiB/s (matching the full 9.14 MS/s
-8-bit-IQ rate) for 10+ seconds with no dropped-sample warnings, despite
-the HackRF being three USB hub-hops deep (`1-1.1.1.1` per `dmesg`,
-alongside a Stream Deck and a PortaPack).
-
-**Ruled out: missing real-time scheduling.**
-```bash
-chrt -p $(pgrep -f dvbt_tx_2k_qpsk_8mhz_test)   # SCHED_RR, priority 29
-ulimit -r                                        # 95 — ample headroom
-ps -T -p <pid> -o tid,comm,cls,pri,rtprio
-```
-Every thread on the actual signal path — `udp_source3`, all the
-`dvbt_*` FEC/interleaver blocks, `hackrf_sink_c2` — showed `SCHED_RR`
-priority 69/RTPRIO 29, same as the main thread. (10 unrelated `python3`
-threads stayed `SCHED_OTHER`/19, but none of those map to flowgraph
-blocks.)
-
-**Hypothesis tried and found to make no difference:** equal-priority
-`SCHED_RR` round-robin contention among the flowgraph's 13 RT threads
-on only 4 cores, starving the HackRF-feeding thread. Edited
-`scripts/radio/dvbt_tx_2k_qpsk_8mhz_test.grc`:
-- `digital_ofdm_cyclic_prefixer_0.maxoutbuf`: `0` → `1000000` (bigger
-  cushion feeding the sink)
-- `osmosdr_sink_0.affinity`: `''` → `'3'` (dedicated core for the
-  HackRF-feeding thread, no round-robin wait)
-
-then regenerated with `grcc -o . dvbt_tx_2k_qpsk_8mhz_test.grc` and
-reran. **Result: no change — same number of U's as before.** Both
-edits are still in place (harmless, possibly useful once the real
-bottleneck is fixed) but did not address the actual cause.
-
-**Actual cause, found via per-thread `top -H`:**
-```bash
-top -H -p $(pgrep -f dvbt_tx_2k_qpsk_8mhz_test | head -1) -b -n 3 -d 1
-```
-showed `udp_source3` flat at **0.0% CPU** and every other thread barely
-active (peak 13-14% on `dvbt_reference5`) — the signature of a chain
-with *no input data*, not one that's computationally overloaded. Traced
-to: the `ffmpeg -stream_loop 1 -re -i .../S01E01.mp4 ... udp://239.1.1.1:5000`
-test source had already finished (`-stream_loop 1` only replays once
-extra — two total plays — well under the ~16 minutes elapsed) and/or
-`relay_to_hackrf.py` wasn't running, so the GNU Radio flowgraph had
-been fed nothing for a while. Every U seen in this session's testing
-may have been this, not a genuine DVB-T throughput problem — **the
-buffer/affinity changes above were never actually tested against a
-live, continuously-fed signal.**
-
-**State at pause (session interrupted for a PC switch):** ffmpeg
-source restarted (`-stream_loop 1`, PID 62504, started 16:22) but
-`relay_to_hackrf.py` and the TX flowgraph (`dvbt_tx_2k_qpsk_8mhz_test.py`)
-were NOT yet restarted when the session paused.
-
-**Next steps on resume:**
-1. Start `relay_to_hackrf.py`, then `dvbt_tx_2k_qpsk_8mhz_test.py`
-   (or just `start_hackrf.sh`, now pointed at the 8mhz_test script).
-   Use `-stream_loop -1` on the ffmpeg source this time so it can't
-   run out mid-test again.
-2. Watch for U/O with input genuinely flowing continuously. This is
-   the first real test of the maxoutbuf/affinity changes above.
-3. If U's are gone: contention theory was right after all, just
-   untested until now. If U's persist: back to a genuine DVB-T
-   computational-throughput question at 9.14 MS/s on this Pi 4 — matches
-   the original (undated, pre-existing) `.grc` comment's finding from
-   before this session, "the Pi 4 couldn't sustain 8MHz's 9.14MS/s even
-   with real-time scheduling."
-4. Separately, worth checking `dvbt_test.conf`
-   (`scripts/receiver/`) — still configured for `BANDWIDTH_HZ = 6000000`
-   while transmit testing has moved to 8MHz. Any receiver (real TV or
-   test dongle) tuned/scanned for the wrong bandwidth won't lock
-   regardless of how clean the transmit signal is — a separate, simpler
-   possible cause of "not showing up" worth ruling out independently.
+The next challenge — bumping this from the working 6MHz profile up to
+the UK/EU-standard 8MHz channel bandwidth so a normal TV can actually
+tune it — turned into its own investigation, picked up fresh in the
+next video.
