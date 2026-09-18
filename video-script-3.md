@@ -302,3 +302,77 @@ stepping back to consider a fundamentally different, non-GNU-Radio
 implementation of this same DVB-T encoding chain.
 
 ---
+
+## 8. Profiled it properly — found a real gap, but not the root cause ✅
+
+`perf record` (999Hz, DWARF call graphs) on the flowgraph process
+during a live 8MHz underrun captured **zero samples** over a 15-second
+window. That's itself a real finding: the threads spend essentially
+none of their time actively computing — this was never a compute-bound
+problem, confirming everything inferred indirectly earlier, this time
+directly.
+
+Switched to `perf sched record` (scheduler event tracing — measures
+the delay between a thread becoming runnable and actually getting a
+CPU, i.e. genuine scheduling contention, not I/O wait) for the same
+live window. Broken down by block:
+
+| Block | Total wait (15s window) | Wakeups | Max wait |
+|---|---|---|---|
+| **`dvbt_reference_signals`** | **1063 ms** | **6550** | 3.9 ms |
+| `dvbt_inner_coder` | 721 ms | 748 | 3.6 ms |
+| `dvbt_bit_inner_interleaver` | 551 ms | 2321 | 6.0 ms |
+| `dvbt_reed_solomon` | 385 ms | 244 | 2.9 ms |
+| `dvbt_map` | 179 ms | 11345 | 3.3 ms |
+| `dvbt_symbol_inner_interleaver` | 163 ms | 2728 | 2.9 ms |
+| `dvbt_energy_dispersal` | 130 ms | 144 | 2.3 ms |
+| `dvbt_convolutional_interleaver` | 59 ms | 612 | 4.4 ms |
+
+`dvbt_reference_signals` stood out clearly — over a full second of
+15 spent just waiting for a CPU after becoming runnable. Reasoned
+this pointed at equal-priority `SCHED_RR` round-robin contention
+across ~10+ threads on only 4 cores (a real, mathematically obvious
+oversubscription), and planned to test giving deadline-critical
+blocks higher priority than earlier-stage ones.
+
+**Before doing that, checked the actual scheduling class directly —
+and found something much bigger: every single thread, including all
+the named DVB-T blocks, was `SCHED_OTHER` (`TS`), not `SCHED_RR` at
+all.** The flowgraph's own log had been quietly printing `realtime:
+Error: failed to enable real-time scheduling` this entire session,
+and `ulimit -r` on the Pi 5 was `0`. **This whole Pi 5 investigation —
+every test since the migration — had been running with zero real-time
+scheduling active, a massive confound nobody had checked for.**
+
+Root cause: the Pi 4 has a dedicated
+`/etc/security/limits.d/99-gnuradio-rt.conf` granting `pi rtprio 95` —
+clearly set up specifically for this GNU Radio work at some point
+during the undocumented gap between video-script.md steps 14 and 15,
+but never folded into the Pi 5 migration plan because its existence
+wasn't known. Added the identical file to the Pi 5, confirmed via a
+fresh session that `ulimit -r` now correctly reports 95, restarted
+everything clean, and confirmed via `ps -T` that every block thread
+now genuinely shows `SCHED_RR`/RTPRIO 29 — an exact match to the Pi 4.
+
+**Reran the 8MHz test under this now-genuinely-correct configuration:
+identical continuous underruns.** This is disappointing but valuable
+— it means every conclusion from this whole Pi 5 investigation
+(raw CPU speed doesn't help, the relay isn't the cause, HackRF sink
+buffer depth doesn't matter) now holds under an even more rigorous,
+truly apples-to-apples comparison with the Pi 4 than before. The
+missing rtprio limit was a real, independent bug worth fixing
+regardless (now fixed permanently for this Pi 5), but it was not
+*the* answer to the 8MHz mystery.
+
+**Where this genuinely leaves it, late in a long session:** the
+bottleneck is confirmed, real, reproducible, inside the GNU Radio
+DVB-T chain's own scheduling/processing, present with or without
+proper real-time scheduling, present regardless of CPU speed, present
+regardless of relay implementation or HackRF buffer depth. The
+`dvbt_reference_signals` scheduling-wait profile is still the most
+concrete specific lead — worth re-profiling now that real-time
+scheduling is properly active on the Pi 5, since the earlier profile
+was taken under the (unknowingly) broken SCHED_OTHER condition and
+may not reflect the true picture under correct scheduling.
+
+---
