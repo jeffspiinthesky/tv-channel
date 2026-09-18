@@ -140,3 +140,55 @@ software encode + DVB-T transmit sharing the same cores. Worth
 benchmarking for real once a Pi 5 is in hand, rather than assuming.
 
 ---
+
+## 4. Got a Pi 5, migrated the project, retested — the ceiling didn't move ✅
+
+Acquired a Pi 5, did a fresh OS install (not a clone — see
+`plans/pi5-migration.md` for the full step-by-step), and moved
+everything over: ffplayout (rebuilt from the same fork), the NAS
+mount, and the GNU Radio/HackRF scripts (identical package versions to
+the Pi 4 — no compatibility concerns). The HackRF itself was
+physically moved from the Pi 4 to the Pi 5 partway through.
+
+**First attempt was invalid**: ran the 8MHz test while the ffplayout
+fork's Rust build was still compiling in the background. Load average
+hit 5.85 and even the relay script showed hiccups never seen on the
+clean Pi 4 baseline — the build was competing for CPU and contaminated
+the result. Correctly flagged and re-run once genuinely idle.
+
+**Clean, valid retest: same continuous underruns as the Pi 4, despite
+the Pi 5's much faster cores and a system load of under 1.0.** This
+directly disproves the "it's just a slow single core" theory from the
+Pi 4 investigation — if it were purely about raw processing speed, a
+Pi 5 with roughly 2.5-3x the per-core throughput should have cleared
+the ~7-7.5MHz ceiling comfortably. It didn't move at all.
+
+**New lead, and a much better one than "faster cores": the Pi 5's
+kernel uses a 16KB memory page size, versus the Pi 4's 4KB.** GNU
+Radio's buffer implementation (`buffer_double_mapped`, the technique
+behind those "allocation granularity" warnings seen throughout this
+investigation) has to allocate its circular buffers in units of the
+system's page size — a 4x larger page size fundamentally changes that
+buffering/scheduling granularity throughout the whole flowgraph,
+completely independent of how fast the CPU is. This lines up with
+everything seen so far far better than a raw-speed explanation does.
+
+The Pi 5 ships two separate kernel builds: `rpi-v8` (the same generic
+kernel family the Pi 4 uses, presumably 4K pages) and `rpi-2712`
+(Pi-5-specific, currently running, apparently defaulting to 16K
+pages). Trying the `rpi-v8` kernel would directly test this — but
+`rpi-2712` exists specifically because the Pi 5's SoC (including the
+RP1 chip handling USB/GPIO) needs support the older generic kernel may
+lack, so this carries a real risk of a Pi 5 that won't boot properly
+or loses working USB/peripheral support. **Decided not to risk it** —
+not worth it for a diagnostic test, and not a direction to explore
+without a safer way to test it.
+
+**Next step, not yet tried:** GNU Radio's buffer allocator backend
+(`vmcircbuf`) is configurable in userspace, independent of the kernel
+— worth researching whether it can be pointed at a different
+allocation strategy that isn't tied to the system page size, as a
+safer way to test the page-size theory without touching the boot
+kernel at all.
+
+---
