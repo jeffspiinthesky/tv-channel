@@ -97,3 +97,46 @@ implementation, which would mean either accepting a non-standard
 bandwidth or finding a way to lighten the processing chain.
 
 ---
+
+## 3. Considered switching to a Pi 5 to clear the ceiling — real trade-off found ✅
+
+Since the bottleneck looks like a raw processing-speed limit rather
+than a bug, the obvious next question is whether faster hardware just
+solves it outright. A Raspberry Pi 5 has meaningfully faster CPU cores
+than this Pi 4 — worth seriously considering.
+
+**The DVB-T transmit chain itself doesn't care about video hardware at
+all** — it was already established earlier that this leg never touches
+video codecs, only raw MPEG-TS bytes and raw radio bits. So whether a
+Pi 5 fixes the 8MHz ceiling is purely a question of raw CPU speed for
+that one bottlenecked processing block, and a Pi 5's cores are roughly
+2.5-3x faster per-thread than this Pi 4's. Good odds it clears the
+ceiling outright.
+
+**Where it gets more complicated: the *other* leg of this project.**
+This channel's actual video output currently runs on real, working
+hardware H.264 encoding — not software — and that's a big part of why
+CPU load is manageable today. Checked directly against the live
+config rather than assumption, since an earlier working note here had
+gone stale: this really is genuine hardware encode, giving a large,
+confirmed real-world CPU saving over the software fallback.
+
+**The Raspberry Pi 5 has no hardware video encoder at all** (for any
+codec) — a real regression from the Pi 4 on this specific point. So
+migrating loses that hardware-encode saving; the channel's output
+would have to go back to software encoding, this time on much faster
+cores. General community reports suggest a Pi 5 handles 1080p software
+H.264 encoding comfortably on its own — but this channel would also be
+asking those same cores to run the DVB-T transmit chain at the same
+time, so the two workloads would now be sharing CPU on one board in a
+way they effectively don't today. Decode was already software-only on
+both codecs, on this Pi 4 and any future Pi 5 — a wash either way, not
+a new cost.
+
+**Where this leaves it:** a Pi 5 is a promising fix for the 8MHz
+ceiling on paper, but not a guaranteed free upgrade — it trades a
+proven, working hardware-encode setup for an unproven combination of
+software encode + DVB-T transmit sharing the same cores. Worth
+benchmarking for real once a Pi 5 is in hand, rather than assuming.
+
+---
