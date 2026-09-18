@@ -245,3 +245,60 @@ the DVB-T DSP blocks' own per-call processing characteristics
 signal generation) remain the most concrete unexplored territory.
 
 ---
+
+## 6. Why raw `hackrf_transfer` succeeding doesn't contradict this ✅
+
+User asked a good clarifying question: doesn't `hackrf_transfer` go
+through the same `libhackrf` library as the GNU Radio HackRF sink? It
+does — but only at the very last hop. `hackrf_transfer` reads bytes
+directly from a file and hands them straight to that library's USB
+callback: one thread, no format conversion, no other hand-offs. The
+GNU Radio sink, by contrast, sits at the end of a ~10-block chain
+(each block its own OS thread), and has to convert samples from
+32-bit float I/Q to the 8-bit integer format the hardware wants
+before handing them to that same callback. Same bottom-layer library,
+completely different amount of pipeline above it — which is exactly
+why one can be rock solid while the other isn't, without any
+contradiction.
+
+## 7. Tried GNU Radio's own recommended throughput fixes — no change ✅
+
+Based on GNU Radio's own published throughput-optimization guidance
+([An Incomplete Guide to Optimizing GNU Radio Flowgraph
+Throughput](https://blog.ektocomms.space/gnuradio-throughput-guide/)),
+tried the two most relevant techniques not yet attempted:
+
+**Pinning the whole chain to one core**, instead of isolating just the
+HackRF sink onto its own core (the opposite strategy from what was
+tried back in step 1) — the idea being that keeping every block on the
+same core avoids cross-core cache misses and hand-off latency between
+the ~10 threads in this chain.
+
+**Setting a large `min_output_buffer` (131072) on every block**, not
+just the one `max_output_buffer` call from step 1 that had been
+silently clamped down to 8192. This one actually took effect cleanly
+this time (`set_min_output_buffer on block N to 131072` logged for
+every block, no clamping message) — a genuinely different code path
+from the `max_output_buffer` clamp seen before.
+
+**Result: no improvement, and the relay's own backlog got measurably
+worse** (up to ~57KB, vs. the usual 0-25KB range) — consolidating
+everything onto one core appears to have made scheduling contention
+worse, not better, for at least the parts of the system sharing that
+core.
+
+**Where this leaves it, after a genuinely thorough pass:** ruled out
+across this whole investigation — video codec, raw USB/HackRF
+throughput, missing/present real-time scheduling, the RT kernel, CPU
+speed (Pi 4 vs Pi 5), the Python relay entirely (flood-tested with
+zero pacing logic in the path), the HackRF sink's own USB buffer
+depth, GNU Radio's own recommended buffer-size and core-affinity
+fixes. The bottleneck is definitely real, definitely inside the GNU
+Radio DVB-T block chain's own processing/scheduling, and has resisted
+every lever tried so far. Remaining untried directions: actual
+per-block profiling (e.g. `perf record` to see which specific block's
+`work()` call is the actual time sink, rather than guessing), or
+stepping back to consider a fundamentally different, non-GNU-Radio
+implementation of this same DVB-T encoding chain.
+
+---
