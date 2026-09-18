@@ -116,10 +116,13 @@ blocks:
   parameters:
     affinity: ''
     alias: ''
-    comment: cp_len = 2048 / 4 (GI 1/4 at 2K FFT)
+    comment: cp_len = 2048 / 4 (GI 1/4 at 2K FFT). maxoutbuf bumped from
+      default so osmosdr_sink_0 has a bigger cushion to ride out RR
+      scheduling contention among the flowgraph's other equal-priority
+      RT threads (see video-script.md 8MHz-underrun diagnosis).
     cp_len: '512'
     input_size: '2048'
-    maxoutbuf: '0'
+    maxoutbuf: '1000000'
     minoutbuf: '0'
     rolloff: '0'
     tagname: ''
@@ -288,7 +291,7 @@ blocks:
 - name: osmosdr_sink_0
   id: osmosdr_sink
   parameters:
-    affinity: ''
+    affinity: '3'
     alias: ''
     ant0: ''
     args: '""'
@@ -297,6 +300,9 @@ blocks:
     clock_source0: ''
     comment: HackRF via libhackrf directly -- unlike the packaged SoapyHackRF
       module, this accepts the exact fractional 64/7 MS/s DVB-T rate.
+      Pinned to core 3 so it never has to round-robin-wait behind the
+      other equal-priority RT threads for CPU time (see video-script.md
+      8MHz-underrun diagnosis).
     corr0: '0'
     freq0: center_freq
     gain0: tx_gain
