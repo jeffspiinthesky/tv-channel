@@ -192,3 +192,56 @@ safer way to test the page-size theory without touching the boot
 kernel at all.
 
 ---
+
+## 5. Ruled out the Python relay and the HackRF sink's own buffer depth ✅
+
+User pushed back hard on the page-size theory with a sharp point:
+comparing the Pi 4 (4K pages, slow CPU, fails) against the Pi 5 (16K
+pages, fast CPU, fails) confounds two variables at once — it can't
+actually tell us whether page size matters, since CPU speed changed
+at the same time. Also raised a sharper alternative: CPU load on the
+Pi 4 was never actually high, and raw `hackrf_transfer` (no Python
+anywhere in that path) works cleanly and consistently on *both* Pis —
+so the real suspect might be the Python code specifically
+(`relay_to_hackrf.py`, the one part of this chain that's plain Python
+doing manual real-time packet pacing), not the hardware or OS at all.
+
+**Tested and ruled out: relay scheduling priority.** Confirmed the
+relay process runs as ordinary `SCHED_OTHER` (`ps -o cls,rtprio`
+showed `TS`, no RT priority) — a real, concrete difference from the
+flowgraph's own threads, which are all `SCHED_RR`. Gave it real-time
+priority directly (`chrt -f 50`) and reran the clean 8MHz test.
+**No change** — underruns persisted identically. Scheduling priority
+wasn't it.
+
+**Tested and ruled out: the relay's Python pacing precision, entirely
+bypassed.** Captured several seconds of the relay's real, correctly
+null-padded output to a file, then replayed that file into the
+flowgraph via `socat` in a tight unthrottled loop — no rate-pacing
+logic at all, no Python timing loop in the path, data arriving as
+fast as the OS could deliver it. **Underruns were identical.** This
+is decisive: it proves the bottleneck cannot be in the relay's
+pacing implementation, Python or otherwise, since removing that
+component's timing behavior entirely changed nothing. The problem is
+confirmed to live inside the flowgraph/GNU Radio runtime itself.
+
+**Tested and ruled out: the HackRF sink's own USB transfer buffer
+depth.** Found via `strings` on the compiled `gr-osmosdr` library that
+its HackRF sink supports a `buffers=N` device-arg (confirmed against
+the actual `gr-osmosdr` source on GitHub — parsed in
+`hackrf_sink_c.cc`, defaults to a built-in constant, commonly cited as
+32) controlling how many USB transfer buffers are kept in flight.
+Quadrupled it to `buffers=128` on a scratch copy of the flowgraph.
+**No change** — same continuous underruns.
+
+**Where this leaves it:** the bottleneck is now narrowed to somewhere
+genuinely inside the GNU Radio DVB-T block chain's own processing or
+internal scheduling — not the relay, not the HackRF sink's own USB
+buffering, not raw CPU speed, not the OS/kernel scheduling priority.
+The still-unexplained buffer clamp (`ofdm_cyclic_prefixer0`'s max
+output buffer silently capped to 8192, first seen back in step 2) and
+the DVB-T DSP blocks' own per-call processing characteristics
+(Reed-Solomon encoding, convolutional/bit interleaving, OFDM reference
+signal generation) remain the most concrete unexplored territory.
+
+---
