@@ -14,6 +14,14 @@ Group=dvbtx
 SupplementaryGroups=plugdev
 LimitRTPRIO=95
 LimitRTTIME=infinity
+# dvbtx has no real home directory (/nonexistent, from --no-create-home) and
+# ProtectHome=yes blocks writes there anyway -- GNU Radio needs both a
+# writable cache dir (~/.cache/gnuradio) and a writable prefs/config dir
+# (~/.config/gnuradio) or it fails outright on startup.
+CacheDirectory=tv-channel-dvbt
+Environment=XDG_CACHE_HOME=/var/cache/tv-channel-dvbt
+StateDirectory=tv-channel-dvbt
+Environment=XDG_CONFIG_HOME=/var/lib/tv-channel-dvbt
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes

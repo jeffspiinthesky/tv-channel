@@ -1,7 +1,7 @@
 Source: tv-channel-dvbt
 Section: hamradio
 Priority: optional
-Maintainer: Jeff Smith <jeff@jksmith.com>
+Maintainer: Jeffs PI in the Sky <jeffspiinthesky@gmail.com>
 Build-Depends: debhelper-compat (= 13)
 Standards-Version: 4.6.2
 Rules-Requires-Root: no
