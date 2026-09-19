@@ -29,7 +29,8 @@ Two separate installable pieces, on purpose:
 
 ## Hardware requirements
 
-Validated on a Raspberry Pi 4B running a Debian 13 (trixie)-based Raspberry
+Validated end-to-end on two independent Raspberry Pi 4Bs (one headless,
+one running a full desktop) running a Debian 13 (trixie)-based Raspberry
 Pi OS, with a HackRF One, against these package versions: `hackrf` 2024.02.1,
 `gnuradio` 3.10.12.0, `gr-osmosdr` 0.2.6. You also need an antenna, attenuator,
 or dummy load appropriate for how you intend to use this legally -- see below.
@@ -68,7 +69,9 @@ that's on you.
    Then configure it via its web UI (`http://<pi-address>:8787`), including
    setting your channel's DVB service name/provider under the output config
    (this is what shows up as the channel name on a real TV, instead of
-   ffmpeg's default `Service01`).
+   ffmpeg's default `Service01`). During the initial setup wizard, leave the
+   SMTP/email fields blank unless you actually want email notifications --
+   see Troubleshooting if login stops working afterward.
 
 2. **Install `tv-channel-dvbt`.** Build it the same way, natively on the Pi:
    ```
@@ -122,6 +125,18 @@ that's on you.
   causes exactly the same underrun symptoms as too-small a datagram batch.
   Confirm `systemctl show tv-channel-dvbt-transmit -p LimitRTPRIO` reports
   `95`, not `0`.
+- **Can't log in to ffplayout after the initial setup wizard** (a `Mail
+  error: Invalid input` on `/auth/login`): the wizard can end up saving
+  non-empty SMTP fields even if you didn't mean to enable email, which
+  makes login try (and fail) to send a two-factor code on every attempt.
+  Fix by resetting the admin user via the CLI with two-factor off:
+  `sudo -u ffpu ffplayout --user-set -u <user> -m <email> -p <password> --two-factor false`.
+- **`h264_v4l2m2m` fails with `Could not find a valid device`**: this
+  needs `/dev/video*` access, which is group-owned `video` with no
+  "other" access. ffplayout's own package now adds its service user to
+  that group automatically on install; if you're running a version from
+  before that fix, `sudo usermod -aG video ffpu && sudo systemctl
+  restart ffplayout`.
 
 ## Playlist / ad-break tooling
 

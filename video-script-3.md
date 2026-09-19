@@ -767,3 +767,104 @@ git push fork feature/dvb-service-name
 ```
 
 ---
+
+## 14. Command log: the stale-build gotcha, and a second Pi as a clean proving ground
+
+**A real production bug surfaced by the service-name fix itself, found by
+being suspicious of a UI that "should" work but didn't.** After fixing
+the `stream_format`/`isMpegtsStream` field-visibility bug, the field
+still didn't show up -- not a caching issue (confirmed in a fresh
+incognito window), not a wrong-branch issue (confirmed the checked-out
+commit matched), not a stale-binary issue (confirmed the running
+binary's md5sum matched the freshly built one). What actually differed:
+```
+grep -o ".\{150\}stream_format===\`mpegts\`.\{80\}" .../ConfigPlayout-*.js
+```
+showed the OLD buggy condition still compiled into the served bundle.
+Checked the dist file's own mtime against the source fix's commit time
+-- 90+ minutes stale. Root cause: `build.rs` prints exactly one
+`rerun-if-changed` (for the Windows icon), and Cargo's rule is that
+printing *any* `rerun-if-changed` replaces its default "rerun if
+anything changed" heuristic entirely -- so frontend edits had silently
+stopped triggering a rebuild after the very first successful release
+build. Fixed by adding explicit `rerun-if-changed` lines for
+`frontend/src`, `package.json`, `package-lock.json` and `vite.config.ts`.
+Verified the fix landed by checking the compiled (not source) JS
+directly each time, rather than trusting the build's own "success" exit
+code:
+```
+npm run build   # regenerate dist/ by hand to confirm the fix compiles
+grep -o "stream_type;return e===\`udp\`||e===\`srt\`" dist/assets/ConfigPlayout-*.js
+touch backend/app/src/serve/routes.rs   # force Cargo to re-embed the now-correct dist/
+cargo build --release -p ffplayout --no-default-features --features embed_frontend
+```
+
+**Deployed `tv-channel-dvbt` + the ffplayout fork to a second, independent
+Pi 4 (`tv.local`) as a clean proving ground** -- the same machine used a
+couple of weeks ago for Kaffeine receiver testing, now repurposed. Built
+once on `teletext`, copied the finished `.deb`s over rather than
+rebuilding from source a second time:
+```
+scp ffplayout_2.2.1-3_arm64.deb tv-channel-dvbt_1.0.0-3_arm64.deb pi@tv.local:/tmp/
+ssh pi@tv.local sudo apt-get install -y /tmp/ffplayout_2.2.1-3_arm64.deb
+ssh pi@tv.local sudo apt-get install -y /tmp/tv-channel-dvbt_1.0.0-3_arm64.deb
+```
+Both installed clean on a genuinely fresh machine -- `dvbtx` user
+created, both services disabled+inactive, `LimitRTPRIO=95` applied,
+confirming the packaging is portable and not just working by
+coincidence on the original dev machine.
+
+**Three real, independent gotchas found getting this second machine
+fully working, none of them DVB-T-specific:**
+
+1. NAS mount wasn't replicated yet -- ffplayout's storage lives on the
+   same NAS as `teletext`, so the fstab entry needed copying over
+   before ffplayout had anything to play.
+2. The browser-based initial setup wizard left the admin account in a
+   state where login always failed with a cryptic `Mail error: Invalid
+   input` -- turned out to be a real, if narrow, product bug: the login
+   flow tries to send a 2FA code by email whenever the user has
+   `two_factor` set *and* the global SMTP fields are non-empty, and the
+   setup wizard had apparently submitted non-empty SMTP placeholder
+   values without the user intending to enable email at all. Fixed by
+   resetting the admin user via the CLI with two-factor explicitly
+   disabled, bypassing the whole email path:
+   ```
+   sudo -u ffpu /usr/bin/ffplayout --user-set -u jeff -m jeffspiinthesky@gmail.com -p 'Password1' --two-factor false
+   ```
+3. Playout start failed in a loop (`Run channel 1 failed: Conflict:
+   Permission denied`) even though the NAS content itself was readable
+   by `ffpu` -- the actual cause was `h264_v4l2m2m` unable to open any
+   `/dev/video*` device, since those are group-owned `video` with no
+   "other" access and this fresh install's `ffpu` had never been added
+   to that group (confirmed via the real ffmpeg error,
+   `Could not find a valid device`, and via `ls -la /dev/video*`).
+   `teletext`'s `ffpu` already had this membership, just never through
+   anything the package itself does -- a real, previously-unnoticed gap
+   in `debian/postinst`, now fixed there directly so future installs
+   don't need this manual step:
+   ```
+   sudo usermod -aG video ffpu
+   sudo systemctl restart ffplayout
+   ```
+
+**Result: full end-to-end validation on independent hardware.** DVB-T
+transmit enabled the same way as on `teletext` (`systemctl enable --now
+tv-channel-dvbt-transmit.service`), settled to 1 underrun over 45
+seconds -- cleaner than most `teletext` runs -- and confirmed received
+on a real TV. Investigated `tv.local`'s visibly higher CPU load
+(`uptime` showing 5.7 vs. `teletext`'s typical load) before assuming
+the obvious culprit (a desktop session left over from Kaffeine testing)
+-- ruled that out directly (`labwc`/`wf-panel-pi` at 0.2-0.6% CPU, not
+the driver) and confirmed hardware encode was genuinely active rather
+than silently falling back to software:
+```
+sudo ls -la /proc/<ffplayout_pid>/fd/ | grep video   # /dev/video11 open -- real hardware encode
+```
+The actual explanation: decode is software-only everywhere in this
+fork (confirmed earlier this session, still true), and this test
+playlist's WebM (VP8/VP9) sources decode far more expensively in
+software than the plain H.264 content this project's real playlists
+normally use -- a content difference, not a setup problem.
+
+---
