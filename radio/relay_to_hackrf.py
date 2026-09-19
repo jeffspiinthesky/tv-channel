@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 """Relay ffplayout's multicast MPEG-TS to a local, null-padded, fixed-bitrate
-feed that GNU Radio's dvbt_tx_2k_qpsk.grc flowgraph can consume.
+feed that GNU Radio's dvbt_tx.grc flowgraph can consume.
 
-Two problems this solves:
+Three problems this solves:
   1. GNU Radio's network.udp_source block has no multicast-join support, so
      it can never see udp://239.1.1.1:5000 directly -- this script joins the
      multicast group itself and re-emits on a plain unicast loopback port.
   2. DVB-T needs a *constant* bitrate matching the chosen modulation profile
-     -- 2K FFT, QPSK, code rate 1/2, guard interval 1/4. At 8MHz bandwidth
-     that's 4.976 Mbit/s per EN 300 744's useful-bitrate table; dropped to
-     6MHz (to cut GNU Radio's CPU load enough for the Pi 4 to keep up) it
-     scales linearly to ~3.732 Mbit/s (only the sample clock changes between
-     bandwidth variants -- FFT size, carrier count and code rate don't).
-     ffplayout's actual content stream (~2.81Mbps) falls short of that, so
-     this pads the gap with real null TS packets (PID 0x1FFF), paced in
-     real time.
+     -- 2K FFT, QPSK, code rate 1/2, guard interval 1/4. Useful bitrate
+     scales linearly with bandwidth for this fixed profile (only the sample
+     clock changes -- FFT size, carrier count and code rate don't): EN 300
+     744's table gives 4.976 Mbit/s at 8MHz and 3.732 Mbit/s at 6MHz, both
+     exactly bandwidth_hz * 0.622, which --target-bitrate derives from
+     --bandwidth-hz unless given explicitly. ffplayout's actual content
+     stream (~2.81Mbps) falls short of that, so this pads the gap with real
+     null TS packets (PID 0x1FFF), paced in real time.
+  3. At 8MHz specifically, GNU Radio's dvbt_reference_signals block only
+     settles into steady, non-underrunning operation once each UDP datagram
+     carries enough data -- bisected 2026-09-19: 7 packets/1316 bytes
+     underruns continuously forever, the cliff to "settles after a handful
+     of startup underruns" is at 34-35 packets/~6.4-6.6KB, and the default
+     of 40 gives real margin above that cliff (confirmed clean over
+     repeated 60s+ runs). 6MHz/7MHz never needed this, but a bigger batch
+     doesn't hurt them either -- they have far more headroom to begin with.
 
 (TSDuck's `tsp -P mux` was tried first for the padding step, but its
 --inter-packet insertion rate didn't behave predictably when chained -- an
@@ -33,14 +41,9 @@ import time
 TS_PACKET_SIZE = 188
 TS_SYNC_BYTE = 0x47
 NULL_PACKET = bytes([0x47, 0x1F, 0xFF, 0x10]) + bytes([0xFF] * (TS_PACKET_SIZE - 4))
-# At 8MHz, GNU Radio's dvbt_reference_signals block only settles into steady,
-# non-underrunning operation once each UDP datagram carries enough data --
-# bisected 2026-09-19: 7 packets/1316 bytes underruns continuously forever,
-# the cliff to "settles after a handful of startup underruns" is at 34-35
-# packets/~6.4-6.6KB, and 40 gives real margin above that cliff (confirmed
-# clean over repeated 60s+ runs). 6MHz/7MHz never needed this, but a bigger
-# batch doesn't hurt them either -- they have far more headroom to begin with.
-PACKETS_PER_DATAGRAM = 40  # 40*188 = 7520 bytes -- must match the flowgraph's udp_source payload_size
+# EN 300 744 useful bitrate / bandwidth ratio for 2K/QPSK/CR1-2/GI1-4,
+# verified exact for both known figures: 4,976,000/8,000,000 == 3,732,000/6,000,000 == 0.622
+BITRATE_PER_HZ = 0.622
 
 
 def resync(buf):
@@ -84,9 +87,22 @@ def main():
     ap.add_argument("--src-addr", default="239.1.1.1")
     ap.add_argument("--src-port", type=int, default=5000)
     ap.add_argument("--dst-port", type=int, default=6000)
-    ap.add_argument("--target-bitrate", type=float, default=3_732_000,
-                     help="EN 300 744 useful bitrate for the chosen DVB-T profile (bps)")
+    ap.add_argument("--bandwidth-hz", type=float, default=8_000_000,
+                     help="DVB-T channel bandwidth in Hz; must match the flowgraph's "
+                          "--bandwidth-hz. Used to auto-derive --target-bitrate unless "
+                          "that flag is given explicitly")
+    ap.add_argument("--target-bitrate", type=float, default=None,
+                     help="Override the auto-derived EN 300 744 useful bitrate (bps). "
+                          "Only needed if you change the modulation profile")
+    ap.add_argument("--packets-per-datagram", type=int, default=40,
+                     help="TS packets per outbound UDP send -- must match the "
+                          "flowgraph's --packets-per-datagram exactly")
     args = ap.parse_args()
+
+    target_bitrate = args.target_bitrate
+    if target_bitrate is None:
+        target_bitrate = args.bandwidth_hz * BITRATE_PER_HZ
+    datagram_size = args.packets_per_datagram * TS_PACKET_SIZE
 
     # Backgrounding this script with `&` inside a non-interactive shell (as
     # start_hackrf.sh does) makes bash set SIGINT/SIGQUIT to be ignored for
@@ -101,7 +117,7 @@ def main():
     out_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dst = ("127.0.0.1", args.dst_port)
 
-    packet_interval = (TS_PACKET_SIZE * 8) / args.target_bitrate
+    packet_interval = (TS_PACKET_SIZE * 8) / target_bitrate
     buf = bytearray()
     batch = bytearray()
     real_count = 0
@@ -111,7 +127,8 @@ def main():
     next_send_time = time.monotonic()
 
     print(f"Relaying {args.src_addr}:{args.src_port} -> 127.0.0.1:{args.dst_port} "
-          f"at {args.target_bitrate:.0f} bps ({packet_interval * 1e6:.1f}us/packet)")
+          f"at {target_bitrate:.0f} bps ({packet_interval * 1e6:.1f}us/packet), "
+          f"{args.packets_per_datagram} packets/datagram ({datagram_size} bytes)")
 
     while True:
         try:
@@ -139,7 +156,7 @@ def main():
             null_count += 1
 
         batch.extend(packet)
-        if len(batch) >= PACKETS_PER_DATAGRAM * TS_PACKET_SIZE:
+        if len(batch) >= datagram_size:
             out_sock.sendto(bytes(batch), dst)
             batch.clear()
 

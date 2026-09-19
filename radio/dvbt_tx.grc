@@ -7,12 +7,15 @@ options:
     comment: ''
     copyright: ''
     description: DVB-T transmit, 2K/QPSK/CR1-2/GI1-4, fed from a local UDP relay
-      (see relay-to-hackrf.sh) instead of a file, driving a HackRF via SoapySDR.
+      (see relay_to_hackrf.py) instead of a file, driving a HackRF via SoapySDR.
+      Bandwidth/frequency/gain/UDP port/datagram-batch-size are all runtime
+      parameters -- see the CLI flags this generates -- so one flowgraph covers
+      any DVB-T bandwidth instead of maintaining a separate file per bandwidth.
     gen_cmake: 'On'
     gen_linking: dynamic
     generate_options: no_gui
     hier_block_src_path: '.:'
-    id: dvbt_tx_2k_qpsk_8mhz_test
+    id: dvbt_tx
     max_nouts: '0'
     output_language: python
     placement: (0,0)
@@ -33,11 +36,36 @@ options:
     state: enabled
 
 blocks:
-- name: center_freq
-  id: variable
+- name: bandwidth_hz
+  id: parameter
   parameters:
+    alias: ''
+    comment: Must match your country's real DVB-T bandwidth. UK/most-of-Europe
+      standard is 8000000 -- this project's default, validated end-to-end
+      (GNU Radio -> HackRF -> a real TV). Only use 6000000/7000000 if your
+      own country's terrestrial standard genuinely uses it -- see README.
+    hide: none
+    label: Bandwidth (Hz)
+    short_id: b
+    type: intx
+    value: '8000000'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [8, 12]
+    rotation: 0
+    state: enabled
+- name: center_freq
+  id: parameter
+  parameters:
+    alias: ''
     comment: ''
-    value: '610e6'
+    hide: none
+    label: Center frequency (Hz)
+    short_id: f
+    type: eng_float
+    value: 610e6
   states:
     bus_sink: false
     bus_source: false
@@ -48,13 +76,10 @@ blocks:
 - name: samp_rate
   id: variable
   parameters:
-    comment: TEST -- back to 8MHz to re-check now that the receiver-side
-      firmware bug is fixed. Originally dropped to 6MHz because the Pi 4
-      couldn't sustain 8MHz's 9.14MS/s even with real-time scheduling --
-      that finding was about the transmit side's raw CPU/USB throughput,
-      not the receiver, so it should still apply unchanged. Worth
-      re-testing rather than assuming.
-    value: (8000000.0 * 8) / 7
+    comment: Sample clock scales linearly with bandwidth for this fixed
+      2K/QPSK/CR1-2/GI1-4 profile -- only bandwidth_hz needs to change to
+      retune bandwidth.
+    value: (bandwidth_hz * 8) / 7
   states:
     bus_sink: false
     bus_source: false
@@ -63,9 +88,14 @@ blocks:
     rotation: 0
     state: enabled
 - name: tx_gain
-  id: variable
+  id: parameter
   parameters:
+    alias: ''
     comment: ''
+    hide: none
+    label: TX gain (dB)
+    short_id: g
+    type: intx
     value: '40'
   states:
     bus_sink: false
@@ -75,16 +105,45 @@ blocks:
     rotation: 0
     state: enabled
 - name: udp_port
-  id: variable
+  id: parameter
   parameters:
-    comment: relay-to-hackrf.sh listens on ffplayout's multicast feed and
-      re-emits a null-padded, rate-regulated TS on this local port.
+    alias: ''
+    comment: relay_to_hackrf.py listens on ffplayout's multicast feed and
+      re-emits a null-padded, rate-regulated TS on this local port. Must
+      match the relay's --dst-port.
+    hide: none
+    label: UDP listen port
+    short_id: u
+    type: intx
     value: '6000'
   states:
     bus_sink: false
     bus_source: false
     bus_structure: null
     coordinate: [280, 76.0]
+    rotation: 0
+    state: enabled
+- name: packets_per_datagram
+  id: parameter
+  parameters:
+    alias: ''
+    comment: Must match the relay's --packets-per-datagram exactly -- GNU
+      Radio's network_udp_source requires the sender's datagram size and
+      this payload size to match exactly. Bisected 2026-09-19 -- 7
+      packets/1316 bytes underruns continuously at 8MHz forever; the cliff
+      to clean, stable operation is 34-35 packets/~6.4-6.6KB; 40 gives
+      real margin. Raise this if a different bandwidth/hardware
+      combination underruns.
+    hide: none
+    label: Packets per relay datagram
+    short_id: p
+    type: intx
+    value: '40'
+  states:
+    bus_sink: false
+    bus_source: false
+    bus_structure: null
+    coordinate: [448, 12.0]
     rotation: 0
     state: enabled
 - name: network_udp_source_0
@@ -99,7 +158,7 @@ blocks:
     maxoutbuf: '0'
     minoutbuf: '0'
     notify_missed: 'True'
-    payloadsize: '1316'
+    payloadsize: packets_per_datagram * 188
     port: udp_port
     src_zeros: 'False'
     type: byte
@@ -296,13 +355,14 @@ blocks:
     ant0: ''
     args: '""'
     bb_gain0: '20'
-    bw0: '8000000'
+    bw0: bandwidth_hz
     clock_source0: ''
     comment: HackRF via libhackrf directly -- unlike the packaged SoapyHackRF
       module, this accepts the exact fractional 64/7 MS/s DVB-T rate.
       Pinned to core 3 so it never has to round-robin-wait behind the
       other equal-priority RT threads for CPU time (see video-script.md
-      8MHz-underrun diagnosis).
+      8MHz-underrun diagnosis). Kept unconditional across all bandwidths --
+      it doesn't hurt lower bandwidths.
     corr0: '0'
     freq0: center_freq
     gain0: tx_gain
