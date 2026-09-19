@@ -53,10 +53,18 @@ that's on you.
    cd ~/src/ffplayout
    cargo build --release -p ffplayout --no-default-features --features embed_frontend
    cargo install cargo-deb --locked   # one-time
+   gzip -kf assets/ffplayout.1   # .gitignore excludes the compiled .gz on
+                                  # purpose; no build hook regenerates it yet
    cargo deb -p ffplayout --manifest-path backend/app/Cargo.toml \
-       --variant arm64 -o dist/ffplayout_<version>-1_arm64.deb
+       --no-build --variant arm64 -o dist/ffplayout_<version>-1_arm64.deb
    sudo apt-get install ./dist/ffplayout_<version>-1_arm64.deb
    ```
+   If you're replacing a manually-built ffplayout install from before this
+   package existed, remove `/etc/systemd/system/ffplayout.service` first
+   (`sudo systemctl daemon-reload` after) so systemd picks up the package's
+   own unit at `/usr/lib/systemd/system/ffplayout.service` instead of the
+   stale manual copy -- leave `/etc/systemd/system/ffplayout.service.d/`
+   drop-ins in place, they still apply on top of either.
    Then configure it via its web UI (`http://<pi-address>:8787`), including
    setting your channel's DVB service name/provider under the output config
    (this is what shows up as the channel name on a real TV, instead of
