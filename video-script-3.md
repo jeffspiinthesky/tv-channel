@@ -426,3 +426,67 @@ the flowgraph, and see whether that changes `dvbt_reference_signals`'s
 wake frequency and the underrun behavior together.
 
 ---
+
+## 10. Solved it — batching the relay's UDP sends fixes 8MHz ✅
+
+HackRF physically moved back to the Pi 4 (the Pi 5 is now fully shut
+down — decided last session to make the Pi 4 the default going
+forward). ffplayout needed a manual restart first: it hit the same
+NAS-mount boot race diagnosed back in step 9 of `video-script.md`
+(`Dependency failed for ffplayout.service`) — the mount caught up
+eventually, `systemctl restart ffplayout` was enough, no new fix
+needed. Also caught and stopped a second, unrelated ffplayout instance
+that had been left running on the Pi 5 — two senders on the same
+multicast group would have silently corrupted the test data.
+
+**The queued experiment from last session was the answer.** Built a
+scratch copy of the relay and the 8MHz flowgraph with the UDP batch
+size (packets bundled into each outbound datagram) as a parameter, and
+retested straight at 8MHz:
+
+- 7 packets/datagram (the original size): continuous underruns, never
+  settles — reproduces every prior session's result exactly.
+- 40 packets/datagram: settles to ~25 startup underruns then runs
+  perfectly clean, matching the signature that 6MHz/7MHz always had.
+
+**Bisected to find the real threshold, not just a working point**,
+since a precise number matters more for this video than "somewhere
+between 7 and 40": 14 and 20 packets are still continuously
+underrunning; 30 drops to a light but steady trickle (~7/sec); 32
+lighter still (~3/sec); 33 lighter again (~1/sec); **34-35 packets
+(~6.4-6.6KB per datagram) is the cliff** — underruns drop to startup-
+only and stay there, confirmed over a 90-second run. Below the cliff,
+the underrun rate declines smoothly as the batch grows; at the cliff
+it drops to essentially zero.
+
+**This confirms last session's theory exactly**: `dvbt_reference_signals`
+wasn't struggling with compute or buffer space, it was starved by how
+little data arrived per UDP datagram. Feed it fewer, bigger chunks and
+it settles down immediately, at any bandwidth.
+
+**Found a real, independent bug along the way**: `kill -INT` on the
+relay process had silently never worked when it was launched with `&`
+inside a non-interactive shell script (exactly how `start_hackrf.sh`
+starts it) — bash sets SIGINT/SIGQUIT to be ignored for backgrounded
+jobs in a script with no job control, and the relay never installed
+its own handler to override that, unlike the flowgraph script (which
+does, and was always killed cleanly). Confirmed via `/proc/<pid>/status`
+`SigIgn`. Fixed by adding explicit `signal.signal()` handlers to the
+relay, matching the flowgraph's existing pattern.
+
+**Applied to the real production files** (not just the scratch
+copies), then re-validated end to end before committing:
+`relay_to_hackrf.py`'s `PACKETS_PER_DATAGRAM` raised from 7 to 40
+(real margin above the 34-35 cliff, matching the flowgraph's now
+40-packet/7520-byte `udp_source` payload size), the SIGINT fix added,
+and `start_hackrf.sh` corrected to pass `--target-bitrate 4976000`
+explicitly (it was launching the 8MHz flowgraph but relying on the
+relay's 6MHz-profile default bitrate — a separate latent mismatch
+found while making this change, likely never exercised since testing
+had always passed the rate explicitly by hand).
+
+**Status: 8MHz DVB-T transmit is fixed.** Next step is putting a real
+antenna/attenuator chain back between the HackRF and a receiver to
+confirm reception at 8MHz, not just that GNU Radio stops underrunning.
+
+---

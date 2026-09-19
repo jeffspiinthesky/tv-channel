@@ -24,14 +24,23 @@ buffered, otherwise a null packet, once every packet_interval seconds.)
 """
 
 import argparse
+import signal
 import socket
 import struct
+import sys
 import time
 
 TS_PACKET_SIZE = 188
 TS_SYNC_BYTE = 0x47
 NULL_PACKET = bytes([0x47, 0x1F, 0xFF, 0x10]) + bytes([0xFF] * (TS_PACKET_SIZE - 4))
-PACKETS_PER_DATAGRAM = 7  # 7*188 = 1316 bytes, matches the flowgraph's UDP payloadsize
+# At 8MHz, GNU Radio's dvbt_reference_signals block only settles into steady,
+# non-underrunning operation once each UDP datagram carries enough data --
+# bisected 2026-09-19: 7 packets/1316 bytes underruns continuously forever,
+# the cliff to "settles after a handful of startup underruns" is at 34-35
+# packets/~6.4-6.6KB, and 40 gives real margin above that cliff (confirmed
+# clean over repeated 60s+ runs). 6MHz/7MHz never needed this, but a bigger
+# batch doesn't hurt them either -- they have far more headroom to begin with.
+PACKETS_PER_DATAGRAM = 40  # 40*188 = 7520 bytes -- must match the flowgraph's udp_source payload_size
 
 
 def resync(buf):
@@ -78,6 +87,15 @@ def main():
     ap.add_argument("--target-bitrate", type=float, default=3_732_000,
                      help="EN 300 744 useful bitrate for the chosen DVB-T profile (bps)")
     args = ap.parse_args()
+
+    # Backgrounding this script with `&` inside a non-interactive shell (as
+    # start_hackrf.sh does) makes bash set SIGINT/SIGQUIT to be ignored for
+    # it -- without an explicit handler here, `kill -INT` on this process is
+    # a silent no-op and it runs forever.
+    def _exit(signum, frame):
+        sys.exit(0)
+    signal.signal(signal.SIGINT, _exit)
+    signal.signal(signal.SIGTERM, _exit)
 
     in_sock = open_multicast_source(args.src_addr, args.src_port)
     out_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

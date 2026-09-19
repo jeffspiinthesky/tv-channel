@@ -57,7 +57,9 @@ class dvbt_tx_2k_qpsk_8mhz_test(gr.top_block):
         self.osmosdr_sink_0.set_antenna('', 0)
         self.osmosdr_sink_0.set_bandwidth(8000000, 0)
         self.osmosdr_sink_0.set_processor_affinity([3])
-        self.network_udp_source_0 = network.udp_source(gr.sizeof_char, 1, udp_port, 0, 1316, True, False, False)
+        # Must match relay_to_hackrf.py's PACKETS_PER_DATAGRAM*188 -- see that
+        # file's comment for why 8MHz needs a much bigger batch than 1316.
+        self.network_udp_source_0 = network.udp_source(gr.sizeof_char, 1, udp_port, 0, 7520, True, False, False)
         self.dtv_dvbt_symbol_inner_interleaver_0 = dtv.dvbt_symbol_inner_interleaver(1512, dtv.T2k, 1)
         self.dtv_dvbt_reference_signals_0 = dtv.dvbt_reference_signals(
             gr.sizeof_gr_complex,
