@@ -1,2 +1,11 @@
 __pycache__/
 *.pyc
+
+# dpkg-buildpackage output for debian/ packaging
+debian/tv-channel-dvbt/
+debian/.debhelper/
+debian/*.substvars
+debian/*.debhelper.log
+debian/debhelper-build-stamp
+debian/files
+debian/*.debhelper

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+#DEBHELPER#
+
+if [ "$1" = "configure" ]; then
+    if ! getent passwd dvbtx >/dev/null 2>&1; then
+        adduser --system --no-create-home --group dvbtx
+    fi
+    # Deliberately no `systemctl enable`/`--now`: RF transmission is
+    # regulated spectrum use. See README.md's legal/safety section -- a
+    # viewer must opt in explicitly after reading it.
+    systemctl daemon-reload || true
+fi

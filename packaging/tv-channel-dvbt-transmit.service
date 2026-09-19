@@ -1,0 +1,25 @@
+[Unit]
+Description=DVB-T transmit via GNU Radio + HackRF One (2K/QPSK/CR1-2/GI1-4)
+Documentation=file:///usr/share/doc/tv-channel-dvbt/README.md
+After=tv-channel-dvbt-relay.service
+BindsTo=tv-channel-dvbt-relay.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/tv-channel-dvbt/transmit-wrapper.sh
+User=dvbtx
+Group=dvbtx
+SupplementaryGroups=plugdev
+LimitRTPRIO=95
+LimitRTTIME=infinity
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+radio/relay_to_hackrf.py usr/lib/tv-channel-dvbt/
+radio/dvbt_tx.py usr/lib/tv-channel-dvbt/
+packaging/relay-wrapper.sh usr/lib/tv-channel-dvbt/
+packaging/transmit-wrapper.sh usr/lib/tv-channel-dvbt/
+packaging/dvbt.conf etc/tv-channel-dvbt/
+packaging/tv-channel-dvbt-relay.service usr/lib/systemd/system/
+packaging/tv-channel-dvbt-transmit.service usr/lib/systemd/system/

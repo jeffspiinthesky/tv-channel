@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+#DEBHELPER#
+
+if [ "$1" = "purge" ]; then
+    if getent passwd dvbtx >/dev/null 2>&1; then
+        deluser dvbtx || true
+    fi
+    rm -rf /etc/tv-channel-dvbt
+fi

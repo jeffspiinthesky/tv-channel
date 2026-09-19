@@ -1,0 +1,22 @@
+[Unit]
+Description=Relay ffplayout's multicast MPEG-TS for DVB-T transmission
+Documentation=file:///usr/share/doc/tv-channel-dvbt/README.md
+After=ffplayout.service network.target
+BindsTo=ffplayout.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/tv-channel-dvbt/relay-wrapper.sh
+User=dvbtx
+Group=dvbtx
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
