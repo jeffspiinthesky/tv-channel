@@ -490,3 +490,280 @@ antenna/attenuator chain back between the HackRF and a receiver to
 confirm reception at 8MHz, not just that GNU Radio stops underrunning.
 
 ---
+
+## 11. Command log: bisecting the batch-size cliff and the SIGINT bug
+
+Full command sequence behind section 10's numbers, in order. Baseline
+reproduction at the original 7-packet batch size, 8MHz:
+
+```
+python3 -u relay_to_hackrf_batch_test.py --target-bitrate 4976000 --packets-per-datagram 7
+python3 -u dvbt_tx_2k_qpsk_8mhz_batch_test.py --payload-size 1316
+```
+→ continuous underruns from the first second, never settles.
+
+At 40 packets/7520 bytes, same test:
+```
+python3 -u relay_to_hackrf_batch_test.py --target-bitrate 4976000 --packets-per-datagram 40
+python3 -u dvbt_tx_2k_qpsk_8mhz_batch_test.py --payload-size 7520
+```
+→ ~23 startup underruns then clean for 60s+.
+
+**Found the relay was immune to `kill -INT`** while cleaning up between
+these runs -- `ps aux` kept showing the relay process alive after the
+kill:
+```
+kill -INT <relay_pid> <flow_pid>
+ps aux | grep -iE "relay_to_hackrf|dvbt_tx"   # relay still there
+grep -i "SigIgn" /proc/<relay_pid>/status      # SigIgn: 0000000001001006
+```
+`0x1001006` decodes to SIGINT (2) and SIGQUIT (3) both set in the
+ignore mask -- a bash behavior, not a bug in the relay's own logic:
+backgrounding a command with `&` inside a non-interactive shell script
+(exactly how `start_hackrf.sh` runs it) makes bash set SIGINT/SIGQUIT
+to ignored for that job unless the program installs its own handler.
+The flowgraph script already does (`signal.signal(signal.SIGINT, ...)`
+in its generated `main()`), which is why it always died cleanly and
+this went unnoticed until now. Fixed by adding the same handler to the
+relay.
+
+**Bisection**, each step run for 45s via a small harness script
+(`run_batch_test.sh <packets> <duration> <outdir>`, not committed --
+starts both processes, snapshots the underrun count at the halfway
+point and at the end, force-kills anything still alive after a 3s
+grace period):
+```
+run_batch_test.sh 14 45 <outdir>   # underruns_total=612, still climbing
+run_batch_test.sh 20 45 <outdir>   # underruns_total=1216, noisier (see below)
+run_batch_test.sh 30 45 <outdir>   # underruns_total=335, ~7/sec steady
+run_batch_test.sh 32 45 <outdir>   # underruns_total=156, ~3/sec
+run_batch_test.sh 33 45 <outdir>   # underruns_total=67, ~1/sec trickle
+run_batch_test.sh 34 90 <outdir>   # underruns_total=28, only 1 in second half
+run_batch_test.sh 35 45 <outdir>   # underruns_total=28, 0 in second half -- settled
+```
+The 20-packet run's unusually high count turned out to be contaminated
+by a leftover 14-packet relay instance still running from the previous
+step (caught via `ps aux` showing two `relay_to_hackrf_batch_test.py`
+processes at once) -- a direct consequence of the SIGINT bug above:
+the harness's own `kill -INT` on the relay silently did nothing, so
+the *next* test started a second relay writing to the same UDP port
+as the first. Re-ran 14 and 20 after fixing the SIGINT handling;
+14 reproduced almost exactly (612 vs. an earlier 616), confirming only
+20 had been contaminated.
+
+**Discovered mid-session, unrelated**: `systemctl status ffplayout`
+showed `inactive (dead)` -- the same NAS-mount boot race from
+`video-script.md` step 9 resurfaced (`Dependency failed for
+ffplayout.service`), just not yet followed by a fix-verifying reboot.
+Fixed with a plain restart once the mount had caught up:
+```
+systemctl status ffplayout
+mount | grep share
+sudo systemctl restart ffplayout
+```
+
+**Applied to production**, then validated with the real files (not
+the scratch copies) for 45s:
+```
+python3 -u relay_to_hackrf.py --target-bitrate 4976000
+python3 -u dvbt_tx_2k_qpsk_8mhz_test.py
+```
+→ 28 underruns total, matching the tuned scratch result exactly.
+
+---
+
+## 12. Command log: productizing into systemd services + two .deb packages
+
+Unifying the 6MHz/8MHz flowgraphs into one parametrized `dvbt_tx.grc`
+(GRC Parameter blocks for `bandwidth_hz`/`center_freq`/`tx_gain`/
+`udp_port`/`packets_per_datagram`), regenerated with GRC's own
+compiler rather than hand-patched:
+```
+grcc dvbt_tx.grc -o .
+python3 dvbt_tx.py --help   # confirms --bandwidth-hz, --center-freq,
+                            # --tx-gain, --udp-port, --packets-per-datagram
+```
+Re-ran the same 45s settle check against the regenerated files and got
+27 startup underruns then clean -- matching every prior run.
+
+**Building the new `tv-channel-dvbt` package** (relay + transmit as
+systemd services, `/etc/tv-channel-dvbt/dvbt.conf`, wrapper scripts):
+```
+sudo apt-get install debhelper dpkg-dev
+dpkg-buildpackage -us -uc -a arm64
+systemd-analyze verify packaging/tv-channel-dvbt-*.service
+sudo apt-get install ./tv-channel-dvbt_1.0.0-1_arm64.deb
+systemctl is-enabled tv-channel-dvbt-relay tv-channel-dvbt-transmit   # disabled
+systemctl is-active tv-channel-dvbt-relay tv-channel-dvbt-transmit    # inactive
+```
+
+**First live cutover attempt crashed immediately**:
+```
+sudo systemctl enable --now tv-channel-dvbt-transmit.service
+journalctl -u tv-channel-dvbt-transmit --no-pager -n 60
+```
+```
+RuntimeError: filesystem error: cannot create directories: Read-only file system [/nonexistent/.cache/gnuradio]
+```
+The `dvbtx` system user (`adduser --system --no-create-home`) has no
+real home directory, and `ProtectHome=yes` blocks writes there anyway
+-- GNU Radio wants a writable cache dir. Fixed with `CacheDirectory=`/
+`XDG_CACHE_HOME` on the unit; rebuilt and reinstalled (version bumped
+each time since dpkg won't reinstall an unchanged version string):
+```
+sudo systemctl reset-failed tv-channel-dvbt-transmit.service
+dpkg-buildpackage -us -uc -a arm64
+sudo apt-get install ./tv-channel-dvbt_1.0.0-2_arm64.deb
+sudo systemctl restart tv-channel-dvbt-transmit.service
+```
+**Second crash, different directory**:
+```
+RuntimeError: filesystem error: cannot create directories: Read-only file system [/nonexistent/.config/gnuradio/prefs]
+```
+Same root cause, GNU Radio's separate prefs/config directory this
+time. Fixed with `StateDirectory=`/`XDG_CONFIG_HOME`, rebuilt as
+version `-3`, reinstalled, restarted -- clean this time (0-5 startup
+underruns, no crash).
+
+**Verified the `BindsTo` cascade** actually works both ways, not just
+on paper:
+```
+systemctl is-active ffplayout tv-channel-dvbt-relay tv-channel-dvbt-transmit
+sudo systemctl stop ffplayout
+systemctl is-active ffplayout tv-channel-dvbt-relay tv-channel-dvbt-transmit
+# all three inactive -- confirmed the stop cascades down
+sudo systemctl start ffplayout
+sudo systemctl start tv-channel-dvbt-transmit.service
+# all three active again
+```
+
+---
+
+## 13. Command log: the ffplayout DVB service-name patch and its own build bugs
+
+The TV showed the channel as `:Service01` -- ffmpeg's mpegts muxer
+default when no `-metadata service_name`/`service_provider` is set.
+Confirmed the exact cause before writing any code:
+```
+ffmpeg -hide_banner -h muxer=mpegts   # no explicit service_name option --
+                                        # it's generic -metadata, not an AVOption
+```
+Considered piping through TSDuck's `tsp -P sdt` to rewrite the SDT
+in-flight (`tsp -P sdt --help`, `tsp -I ip --help` confirmed the
+plugins exist and would work), but since the ffplayout fork is
+already patched once (the h264_v4l2m2m bitrate fix), did it natively
+instead -- `OutputConfig` gets `service_name`/`service_provider`
+fields, wired through a DB migration, into `encoded.rs`'s
+`set_metadata()` call gated on `muxer == "mpegts"`, and a matching
+frontend form in `ConfigPlayout.vue`.
+
+**First real build (release, not the dev profile the patch was
+written and tested against) failed** -- the frontend type-check only
+runs for `--release`:
+```
+cargo build --release -p ffplayout --no-default-features --features embed_frontend
+```
+```
+error TS2322: Type 'string | undefined' is not assignable to type 'string | null'.
+```
+`?? undefined` should have been `?? null` -- this codebase's ts-rs
+export maps Rust's `Option<String>` to `string | null`, not
+`string | undefined`. Confirmed the fix in isolation before paying for
+another full build:
+```
+./node_modules/.bin/vue-tsc --build   # exit 0 after the fix
+cargo build --release -p ffplayout --no-default-features --features embed_frontend
+# Finished `release` profile [optimized] target(s) in 10m 52s
+```
+
+**`cargo deb` then failed on a missing asset**:
+```
+cargo install cargo-deb --locked
+cargo deb -p ffplayout --manifest-path backend/app/Cargo.toml --no-build --variant arm64 -o dist/ffplayout_2.2.1-1_arm64.deb
+```
+```
+error: Can't resolve asset: .../assets/ffplayout.1.gz
+```
+`assets/ffplayout.1.gz` was referenced in the packaging metadata and
+deliberately `.gitignore`'d (compiled output shouldn't be committed),
+but nothing in the repo -- CI included -- ever actually generates it
+from a source file. This `--variant arm64` build path had apparently
+never been exercised end-to-end before. Wrote a real `assets/ffplayout.1`
+man page from the binary's own `--help` output, gzipped it, and reran:
+```
+/home/pi/src/ffplayout/target/release/ffplayout --help
+gzip -kf assets/ffplayout.1
+cargo deb -p ffplayout --manifest-path backend/app/Cargo.toml --no-build --variant arm64 -o dist/ffplayout_2.2.1-1_arm64.deb
+```
+→ built clean.
+
+**Installing over the old manually-built ffplayout** needed care --
+its binary and systemd unit were never dpkg-tracked:
+```
+dpkg -S /usr/bin/ffplayout                        # no path found -- untracked
+sudo cp -a /usr/share/ffplayout/db/ffplayout.db /home/pi/ffplayout.db.backup-$(date +%Y%m%d-%H%M%S)
+sudo apt-get install ./dist/ffplayout_2.2.1-1_arm64.deb
+dpkg -S /usr/bin/ffplayout                        # now owned by the ffplayout package
+diff /etc/systemd/system/ffplayout.service /usr/lib/systemd/system/ffplayout.service
+sudo rm /etc/systemd/system/ffplayout.service      # stale manual copy, now redundant
+sudo systemctl daemon-reload
+systemctl cat ffplayout.service                    # confirms the vendor unit + drop-in both apply
+```
+
+**Found the field still didn't show up in the UI** even after all of
+this. Traced it to the actual config, not a guess:
+```
+sqlite3 /usr/share/ffplayout/db/ffplayout.db "SELECT id, name, stream_format, stream_type FROM outputs;"
+```
+```
+2|stream||udp
+```
+`stream_format` is blank for a `udp` output -- that field only matters
+for the `Custom` stream type. The real muxer comes from
+`StreamType::muxer()`, which hardcodes `udp`/`srt` to `"mpegts"`
+regardless of `stream_format`. The backend gate (`muxer == "mpegts"`)
+was already correct; the frontend `v-if` was checking the wrong field
+and could never be true for a udp/srt output. Replaced it with a
+computed property mirroring the backend's real logic (`udp`, `srt`, or
+`custom` with `stream_format === 'mpegts'`).
+
+**Reorganizing the branch before pushing**: the fork's own git history
+turned out to be ahead of what this local clone knew about --
+```
+git fetch fork
+git log --oneline -15 fork/main
+git merge-base --is-ancestor e99fb227 fork/main   # already merged via a separate PR
+```
+confirmed the v4l2m2m, engine-error-chain, and remote-source-seek-hang
+fixes were all already live on the fork's `main` (PRs #1-#4) -- so the
+only genuinely new, unpushed work was the two service-name commits.
+Built a fresh branch directly off the current `fork/main` and
+cherry-picked just those, using an isolated worktree so the main
+checkout's (ultimately dead, see below) uncommitted changes were never
+touched:
+```
+git worktree add ../ffplayout-dvb-service-name feature/dvb-service-name
+cd ../ffplayout-dvb-service-name
+git cherry-pick 91b6cc24 2a62f918
+CARGO_TARGET_DIR=/home/pi/src/ffplayout/target cargo build -p ff-engine -p ffplayout
+```
+Also checked whether six files' worth of pre-existing uncommitted
+working-tree changes (a live-source seek fix, some locale strings)
+were real unfinished work or dead weight, rather than assuming either
+way:
+```
+git diff backend/app/src/player/output/playout.rs
+git log --oneline -p 4064a76e -- backend/app/src/player/output/playout.rs
+```
+Byte-for-byte identical to an already-merged commit -- confirmed the
+same for the locale files and `PlayerView.vue` against `fork/main`,
+then discarded all six as stale leftovers:
+```
+git checkout -- backend/app/src/player/output/playout.rs frontend/src/locales/*.ts frontend/src/views/PlayerView.vue
+```
+Pushed the finished branch:
+```
+git push fork feature/dvb-service-name
+```
+
+---
