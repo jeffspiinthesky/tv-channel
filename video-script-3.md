@@ -225,6 +225,39 @@ pacing implementation, Python or otherwise, since removing that
 component's timing behavior entirely changed nothing. The problem is
 confirmed to live inside the flowgraph/GNU Radio runtime itself.
 
+```bash
+# Step 1: capture 5s of the relay's real, correctly-paced output to a file
+ssh -i ~/.ssh/teletext_rsa pi@teletext-pi5.local '
+cd ~/src/tv-channel/scripts/radio
+nohup python3 -u relay_to_hackrf.py --target-bitrate 4976000 > /tmp/relay-capture.log 2>&1 < /dev/null &
+disown
+sleep 1
+timeout 5 socat -u UDP-RECV:6000 - > /tmp/capture.ts 2>/tmp/socat-capture.log
+kill -9 $(pgrep -f "python3 -u relay_to_hackrf") 2>/dev/null
+ls -la /tmp/capture.ts
+'
+
+# Step 2: start the flowgraph, then flood that captured file at it in a
+# tight unthrottled loop -- no pacing, no Python timing logic in the path.
+# -b 1316 matches each send to a single TS-packet-sized datagram, same as
+# the real relay.
+ssh -i ~/.ssh/teletext_rsa pi@teletext-pi5.local '
+cd ~/src/tv-channel/scripts/radio
+nohup python3 -u dvbt_tx_2k_qpsk_8mhz_test.py > /tmp/flowgraph-flood.log 2>&1 < /dev/null &
+disown
+sleep 3
+nohup bash -c "while true; do socat -b 1316 -u FILE:/tmp/capture.ts UDP-SENDTO:127.0.0.1:6000; done" > /tmp/flood.log 2>&1 < /dev/null &
+disown
+sleep 20
+echo "=== flowgraph ==="
+tail -c 900 /tmp/flowgraph-flood.log
+echo "=== load ==="
+cat /proc/loadavg
+echo "=== flood sender CPU ==="
+ps aux | grep socat | grep -v grep
+'
+```
+
 **Tested and ruled out: the HackRF sink's own USB transfer buffer
 depth.** Found via `strings` on the compiled `gr-osmosdr` library that
 its HackRF sink supports a `buffers=N` device-arg (confirmed against
@@ -312,10 +345,39 @@ none of their time actively computing — this was never a compute-bound
 problem, confirming everything inferred indirectly earlier, this time
 directly.
 
+```bash
+ssh -i ~/.ssh/teletext_rsa pi@teletext-pi5.local '
+cd ~/src/tv-channel/scripts/radio
+nohup python3 -u relay_to_hackrf.py --target-bitrate 4976000 > /tmp/relay-perf.log 2>&1 < /dev/null &
+disown
+sleep 1
+nohup python3 -u dvbt_tx_2k_qpsk_8mhz_test.py > /tmp/flowgraph-perf.log 2>&1 < /dev/null &
+disown
+sleep 5
+FLOW_PID=$(pgrep -f "dvbt_tx_2k_qpsk_8mhz_test" | head -1)
+echo "flowgraph PID: $FLOW_PID"
+sudo perf record -F 999 -p $FLOW_PID -g --call-graph dwarf -o /tmp/perf-8mhz.data -- sleep 15
+'
+
+# read back:
+ssh -i ~/.ssh/teletext_rsa pi@teletext-pi5.local 'sudo perf report -i /tmp/perf-8mhz.data --stdio 2>&1 | head -60'
+```
+
 Switched to `perf sched record` (scheduler event tracing — measures
 the delay between a thread becoming runnable and actually getting a
 CPU, i.e. genuine scheduling contention, not I/O wait) for the same
-live window. Broken down by block:
+live window.
+
+```bash
+ssh -i ~/.ssh/teletext_rsa pi@teletext-pi5.local '
+sudo perf sched record -o /tmp/perf-sched-8mhz.data -- sleep 15
+'
+
+# read back, filtered down to the GNU Radio DVB-T block threads:
+ssh -i ~/.ssh/teletext_rsa pi@teletext-pi5.local 'sudo perf sched latency -i /tmp/perf-sched-8mhz.data 2>&1 | grep -iE "dvbt|python3|osmosdr|relay" | head -30'
+```
+
+Broken down by block:
 
 | Block | Total wait (15s window) | Wakeups | Max wait |
 |---|---|---|---|
@@ -384,6 +446,14 @@ active (confirmed via `ps -T`: every block thread `SCHED_RR`/RTPRIO
 29, matching the Pi 4 exactly). Two clean unnamed `python3` threads
 at a higher RTPRIO 50 were checked and ruled out — both sit at 0.0%
 CPU, just idle housekeeping, not competing for cycles.
+
+```bash
+ssh -i ~/.ssh/teletext_rsa pi@teletext-pi5.local '
+sudo perf sched record -o /tmp/perf-sched-rtfix.data -- sleep 15
+'
+
+ssh -i ~/.ssh/teletext_rsa pi@teletext-pi5.local 'sudo perf sched latency -i /tmp/perf-sched-rtfix.data 2>&1 | grep -iE "dvbt|osmosdr|hackrf_sink|udp_source" | head -20'
+```
 
 **With real scheduling active, max wait times across the board dropped
 sharply** (0.4-0.9ms vs. 2-6ms under the earlier broken condition) —
