@@ -1,0 +1,19 @@
+Source: tv-channel-dvbt
+Section: hamradio
+Priority: optional
+Maintainer: Jeffs PI in the Sky <jeffspiinthesky@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: tv-channel-dvbt
+Architecture: any
+Depends: ${misc:Depends}, gnuradio (>= 3.10), gr-osmosdr, hackrf, python3 (>= 3.9)
+Description: DVB-T-over-HackRF transmit chain for ffplayout
+ Relays ffplayout's multicast MPEG-TS output through a GNU Radio DVB-T
+ (2K/QPSK/CR1-2/GI1-4) modulator to a HackRF One for real terrestrial
+ transmission.
+ .
+ Transmitting on broadcast TV frequencies requires local RF-broadcast
+ authorization in most jurisdictions. Both systemd services ship disabled
+ -- see /usr/share/doc/tv-channel-dvbt/README.md before enabling either.

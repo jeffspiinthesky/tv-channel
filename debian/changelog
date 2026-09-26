@@ -1,0 +1,20 @@
+tv-channel-dvbt (1.0.0-3) unstable; urgency=medium
+
+  * Fix tv-channel-dvbt-transmit.service crash-looping on start: GNU Radio
+    needs both a writable cache dir (~/.cache/gnuradio) and a writable
+    prefs/config dir (~/.config/gnuradio), which the dvbtx system user (no
+    real home dir) didn't have under ProtectHome=yes. Added CacheDirectory=/
+    XDG_CACHE_HOME and StateDirectory=/XDG_CONFIG_HOME to the unit.
+
+ -- Jeffs PI in the Sky <jeffspiinthesky@gmail.com>  Sat, 19 Sep 2026 12:30:00 +0100
+
+tv-channel-dvbt (1.0.0-1) unstable; urgency=medium
+
+  * Initial release: relay ffplayout's multicast output through GNU
+    Radio's DVB-T (2K/QPSK/CR1-2/GI1-4) modulator to a HackRF One.
+  * Ships tv-channel-dvbt-relay.service and tv-channel-dvbt-transmit.service,
+    disabled by default -- RF transmission requires local authorization.
+  * Bandwidth/frequency/gain/datagram-batch-size are all configured via
+    /etc/tv-channel-dvbt/dvbt.conf.
+
+ -- Jeffs PI in the Sky <jeffspiinthesky@gmail.com>  Sat, 19 Sep 2026 12:00:00 +0100
